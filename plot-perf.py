@@ -31,7 +31,7 @@ def parse_args():
     return parser.parse_args()
 
 def plot_performance(k, p, c, s):
-    df_with = pd.read_csv(f"./{k}-w-{p}.csv")
+    df_with = pd.read_csv(f"./{k}-performance.csv")
     df_without = pd.read_csv(f"./{k}-w:o-{p}.csv")
 
     # x-axis value is from the first column
