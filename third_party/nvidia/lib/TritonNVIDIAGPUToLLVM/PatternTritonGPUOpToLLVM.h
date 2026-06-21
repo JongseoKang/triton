@@ -3,12 +3,30 @@
 
 #include "TargetInfo.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Transforms/DialectConversion.h"
 #include "triton/Analysis/AxisInfo.h"
 
 namespace mlir {
 namespace triton {
 
 namespace NVIDIA {
+
+class HelionCacheRecipeGuard {
+public:
+  HelionCacheRecipeGuard(Operation *root, ValueRange adaptedOperands,
+                         ConversionPatternRewriter &rewriter);
+  HelionCacheRecipeGuard(const HelionCacheRecipeGuard &) = delete;
+  HelionCacheRecipeGuard &
+  operator=(const HelionCacheRecipeGuard &) = delete;
+  ~HelionCacheRecipeGuard();
+
+  LogicalResult tryReplay();
+  LogicalResult finish(LogicalResult result);
+  LogicalResult finish(LogicalResult result, ValueRange replacements);
+
+private:
+  void *impl = nullptr;
+};
 
 void populateBarrierOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                      RewritePatternSet &patterns,

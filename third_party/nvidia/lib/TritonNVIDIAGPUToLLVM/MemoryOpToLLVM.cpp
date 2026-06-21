@@ -81,6 +81,14 @@ public:
   LogicalResult
   matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> helionCacheOperands;
+    if (adaptor.getSrc())
+      helionCacheOperands.push_back(adaptor.getSrc());
+    NVIDIA::HelionCacheRecipeGuard helionCacheGuard(
+        op.getOperation(), helionCacheOperands, rewriter);
+    if (succeeded(helionCacheGuard.tryReplay()))
+      return success();
+
     if (!op.getSrc())
       return failure();
     MemDescType memDescType = op.getSrc().getType();
@@ -103,7 +111,7 @@ public:
     auto value =
         packLLElements(op.getLoc(), typeConverter, values, rewriter, structTy);
     rewriter.replaceOp(op, value);
-    return success();
+    return helionCacheGuard.finish(success(), ValueRange(value));
   }
 
 private:
@@ -161,6 +169,12 @@ struct LocalStoreOpConversion
   LogicalResult
   matchAndRewrite(triton::gpu::LocalStoreOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> helionCacheOperands{adaptor.getDst(), adaptor.getSrc()};
+    NVIDIA::HelionCacheRecipeGuard helionCacheGuard(
+        op.getOperation(), helionCacheOperands, rewriter);
+    if (succeeded(helionCacheGuard.tryReplay()))
+      return success();
+
     MemDescType memDescType = op.getDst().getType();
     RankedTensorType srcTy = op.getSrc().getType();
     Type llvmElemTy = typeConverter->convertType(srcTy.getElementType());
@@ -176,7 +190,7 @@ struct LocalStoreOpConversion
       return failure();
     }
     rewriter.eraseOp(op);
-    return success();
+    return helionCacheGuard.finish(success());
   }
 
 private:

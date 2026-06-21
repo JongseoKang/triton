@@ -32,6 +32,12 @@ struct ConvertLayoutOpSwizzlingConversion
   LogicalResult
   matchAndRewrite(ConvertLayoutOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> helionCacheOperands{adaptor.getSrc()};
+    NVIDIA::HelionCacheRecipeGuard helionCacheGuard(
+        op.getOperation(), helionCacheOperands, rewriter);
+    if (succeeded(helionCacheGuard.tryReplay()))
+      return success();
+
     MLIRContext *ctx = op.getContext();
 
     const auto &shape = op.getType().getShape();
@@ -70,7 +76,7 @@ struct ConvertLayoutOpSwizzlingConversion
       Value result =
           packLLElements(loc, getTypeConverter(), outVals, rewriter, dstTy);
       rewriter.replaceOp(op, result);
-      return success();
+      return helionCacheGuard.finish(success(), ValueRange(result));
     }
     return failure();
   }
@@ -263,6 +269,12 @@ public:
   LogicalResult
   matchAndRewrite(triton::gpu::ConvertLayoutOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> helionCacheOperands{adaptor.getSrc()};
+    NVIDIA::HelionCacheRecipeGuard helionCacheGuard(
+        op.getOperation(), helionCacheOperands, rewriter);
+    if (succeeded(helionCacheGuard.tryReplay()))
+      return success();
+
     RankedTensorType srcTy = op.getSrc().getType();
     RankedTensorType dstTy = op.getType();
     Attribute srcLayout = srcTy.getEncoding();
@@ -272,7 +284,8 @@ public:
         isa<MmaEncodingTrait, BlockedEncodingAttr, SliceEncodingAttr>(
             dstLayout)) {
       if (shouldUseDistSmem(srcLayout, dstLayout))
-        return lowerDistToDistWithDistSmem(op, adaptor, rewriter, targetInfo);
+        return helionCacheGuard.finish(
+            lowerDistToDistWithDistSmem(op, adaptor, rewriter, targetInfo));
     }
 
     return failure();

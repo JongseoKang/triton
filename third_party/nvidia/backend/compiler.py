@@ -3,6 +3,8 @@ from triton._C.libtriton import ir, passes, llvm, nvidia
 from triton import knobs
 from triton.runtime.errors import PTXASError
 
+from . import helioncache
+
 from dataclasses import dataclass
 import functools
 from typing import Any, Dict, Tuple, Optional
@@ -100,6 +102,29 @@ def sm_arch_from_capability(capability: int):
     # TODO: Handle non-"a" sms
     suffix = "a" if capability >= 90 else ""
     return f"sm_{capability}{suffix}"
+
+
+def _helioncache_ttgpu_to_llvm_stats() -> dict[str, int]:
+    getter = getattr(nvidia, "get_ttgpu_to_llvm_cache_stats", None)
+    if getter is None:
+        return {}
+    try:
+        return dict(getter())
+    except Exception:
+        return {}
+
+
+def _helioncache_ttgpu_to_llvm_stats_delta(
+    before: dict[str, int] | None,
+    after: dict[str, int] | None,
+) -> dict[str, int]:
+    if not before or not after:
+        return {}
+    result = {}
+    for name, value in after.items():
+        result[f"helioncache_{name}"] = value
+        result[f"helioncache_delta_{name}"] = value - before.get(name, 0)
+    return result
 
 
 @dataclass(frozen=True)
@@ -340,6 +365,24 @@ class CUDABackend(BaseBackend):
 
     def make_llir(self, src, metadata, options, capability):
         ptx_version = get_ptx_version_from_options(options, self.target.arch)
+        helioncache_level = helioncache.cache_level() if not CUDABackend.instrumentation else 0
+        helioncache_enabled = helioncache_level > 0
+        whole_llir_cache_enabled = helioncache_level == 1
+        cache_key = None
+        if helioncache_enabled:
+            try:
+                cache_key = helioncache.make_whole_llir_key(src, self.hash(), options, capability, ptx_version)
+            except Exception:
+                cache_key = None
+                whole_llir_cache_enabled = False
+        if whole_llir_cache_enabled and cache_key is not None:
+            try:
+                if entry := helioncache.lookup_whole_llir(cache_key):
+                    helioncache.replay_metadata(metadata, entry)
+                    metadata["_helioncache_triton_compile_stage"] = helioncache.stage_event(True, cache_key, entry)
+                    return entry.llir
+            except Exception:
+                whole_llir_cache_enabled = False
 
         mod = src
         # TritonGPU -> LLVM-IR (MLIR)
@@ -359,7 +402,10 @@ class CUDABackend(BaseBackend):
         # instrumentation point here so we can override IRs above (e.g., ttir and ttgir)
         if CUDABackend.instrumentation:
             CUDABackend.instrumentation.patch("ttgpuir_to_llvmir", pm, mod.context)
-        nvidia.passes.ttgpuir.add_to_llvmir(pm, capability, ptx_version)
+        if helioncache_enabled:
+            nvidia.passes.ttgpuir.add_to_llvmir(pm, capability, ptx_version, helioncache_level)
+        else:
+            nvidia.passes.ttgpuir.add_to_llvmir(pm, capability, ptx_version)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         nvidia.passes.ttnvgpuir.add_nvgpu_to_llvm(pm)
@@ -373,7 +419,9 @@ class CUDABackend(BaseBackend):
         if CUDABackend.instrumentation:
             CUDABackend.instrumentation.patch("llvmir_to_llvm", pm, mod.context)
 
+        helioncache_stats_before = _helioncache_ttgpu_to_llvm_stats() if helioncache_enabled else None
         pm.run(mod)
+        helioncache_stats_after = _helioncache_ttgpu_to_llvm_stats() if helioncache_enabled else None
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
         context = llvm.context()
@@ -408,6 +456,29 @@ class CUDABackend(BaseBackend):
         ret = str(llvm_mod)
         del llvm_mod
         del context
+        if whole_llir_cache_enabled and cache_key is not None:
+            try:
+                entry = helioncache.store_whole_llir(cache_key, ret, metadata)
+                event = helioncache.stage_event(False, cache_key, entry)
+                event.update(_helioncache_ttgpu_to_llvm_stats_delta(helioncache_stats_before, helioncache_stats_after))
+                metadata["_helioncache_triton_compile_stage"] = event
+            except Exception:
+                pass
+        elif helioncache_enabled:
+            event = {
+                "helioncache_ttgir_llir_enabled": True,
+                "helioncache_ttgir_llir_cache_level": helioncache_level,
+                "helioncache_ttgir_llir_hit": False,
+                "helioncache_whole_llir_hit": False,
+                "llir_hash": helioncache.stable_text_hash(ret),
+            }
+            if cache_key is not None:
+                event.update({
+                    "ttgir_hash": cache_key.ttgir_hash,
+                    "ttgir_context_hash": cache_key.context_hash,
+                })
+            event.update(_helioncache_ttgpu_to_llvm_stats_delta(helioncache_stats_before, helioncache_stats_after))
+            metadata["_helioncache_triton_compile_stage"] = event
         return ret
 
     def make_ptx(self, src, metadata, opt, capability):

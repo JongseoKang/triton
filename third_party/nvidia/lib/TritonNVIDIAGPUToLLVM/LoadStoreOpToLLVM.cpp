@@ -183,6 +183,17 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
   LogicalResult
   matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> helionCacheOperands;
+    helionCacheOperands.push_back(adaptor.getPtr());
+    if (adaptor.getMask())
+      helionCacheOperands.push_back(adaptor.getMask());
+    if (adaptor.getOther())
+      helionCacheOperands.push_back(adaptor.getOther());
+    NVIDIA::HelionCacheRecipeGuard helionCacheGuard(
+        op.getOperation(), helionCacheOperands, rewriter);
+    if (succeeded(helionCacheGuard.tryReplay()))
+      return success();
+
     auto ctx = getContext();
     auto loc = op->getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -400,7 +411,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     Value resultStruct = packLLElements(loc, typeConverter, loadedVals,
                                         rewriter, llvmResultStructTy);
     rewriter.replaceOp(op, {resultStruct});
-    return success();
+    return helionCacheGuard.finish(success(), ValueRange(resultStruct));
   }
 
   int computeCapability;
@@ -419,6 +430,16 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
   LogicalResult
   matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> helionCacheOperands;
+    helionCacheOperands.push_back(adaptor.getPtr());
+    helionCacheOperands.push_back(adaptor.getValue());
+    if (adaptor.getMask())
+      helionCacheOperands.push_back(adaptor.getMask());
+    NVIDIA::HelionCacheRecipeGuard helionCacheGuard(
+        op.getOperation(), helionCacheOperands, rewriter);
+    if (succeeded(helionCacheGuard.tryReplay()))
+      return success();
+
     Value ptr = op.getPtr();
     Value value = op.getValue();
 
@@ -558,7 +579,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
       ptxBuilder.launch(rewriter, loc, asmReturnTy);
     }
     rewriter.eraseOp(op);
-    return success();
+    return helionCacheGuard.finish(success());
   }
 
   int computeCapability;

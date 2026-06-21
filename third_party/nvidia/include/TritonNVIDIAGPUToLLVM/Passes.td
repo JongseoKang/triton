@@ -27,6 +27,9 @@ def ConvertTritonGPUToLLVM : Pass<"convert-triton-gpu-to-llvm", "mlir::ModuleOp"
         Option<"ptxVersion", "ptx-version",
                "int32_t", /*default*/"80",
                "PTX version">,
+        Option<"cacheLevel", "cache-level",
+               "int32_t", /*default*/"0",
+               "HelionCache TTGIR to LLIR observation/cache level">,
     ];
 }
 def AllocateSharedMemoryNv : Pass<"allocate-shared-memory-nv", "mlir::ModuleOp"> {

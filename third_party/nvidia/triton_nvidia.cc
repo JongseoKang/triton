@@ -28,10 +28,13 @@ void init_triton_nvidia_passes_ttgpuir(py::module &&m) {
               capability, ptxVersion));
         });
   m.def("add_to_llvmir",
-        [](mlir::PassManager &pm, int32_t capability, int32_t ptxVersion) {
+        [](mlir::PassManager &pm, int32_t capability, int32_t ptxVersion,
+           int32_t cacheLevel) {
           pm.addPass(mlir::triton::createConvertTritonGPUToLLVMPass(
-              capability, ptxVersion));
-        });
+              capability, ptxVersion, cacheLevel));
+        },
+        py::arg("pm"), py::arg("capability"), py::arg("ptxVersion"),
+        py::arg("cacheLevel") = 0);
 }
 
 static std::unique_ptr<mlir::Pass>
@@ -172,6 +175,32 @@ void init_triton_nvidia(py::module &&m) {
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });
+
+  m.def("get_ttgpu_to_llvm_cache_stats", []() {
+    auto stats = mlir::triton::getHelionCacheTritonGPUToLLVMStats();
+    py::dict result;
+    result["macro_signature_total"] = stats.macroSignatureTotal;
+    result["macro_signature_hits"] = stats.macroSignatureHits;
+    result["macro_signature_misses"] = stats.macroSignatureUnique;
+    result["macro_signature_unique"] = stats.macroSignatureUnique;
+    result["merkle_node_total"] = stats.merkleNodeTotal;
+    result["merkle_node_hits"] = stats.merkleNodeHits;
+    result["merkle_node_misses"] = stats.merkleNodeUnique;
+    result["merkle_node_unique"] = stats.merkleNodeUnique;
+    result["macro_recipe_total"] = stats.macroRecipeTotal;
+    result["macro_recipe_hits"] = stats.macroRecipeHits;
+    result["macro_recipe_misses"] = stats.macroRecipeMisses;
+    result["macro_recipe_stored"] = stats.macroRecipeStored;
+    result["macro_recipe_materialize_fail"] =
+        stats.macroRecipeMaterializeFail;
+    result["macro_recipe_verify_fail"] = stats.macroRecipeVerifyFail;
+    result["macro_recipe_unsupported"] = stats.macroRecipeUnsupported;
+    result["macro_recipe_entries"] = stats.macroRecipeEntries;
+    result["macro_recipe_bytes"] = stats.macroRecipeBytes;
+    return result;
+  });
+  m.def("reset_ttgpu_to_llvm_cache_stats",
+        []() { mlir::triton::resetHelionCacheTritonGPUToLLVMStats(); });
 
   // Set short point option, this needs to be set before setting the data
   // layout.

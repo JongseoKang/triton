@@ -16,6 +16,8 @@ import functools
 import os
 import time
 import copy
+import socket
+import uuid
 
 # - ^\s*tt\.func\s+ : match the start of the string, any leading whitespace, the keyword func,
 #    and any following whitespace
@@ -142,6 +144,63 @@ def parse(full_name, ext, context):
         return Path(full_name).read_bytes()
 
 
+
+def _helioncache_profile_enabled() -> bool:
+    return os.environ.get("HELIONCACHE_PROFILE_TRITON_COMPILE", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _helioncache_artifact_size(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    try:
+        return len(str(value).encode("utf-8"))
+    except Exception:
+        return None
+
+
+def _helioncache_write_compile_record(record: dict) -> None:
+    if not _helioncache_profile_enabled():
+        return
+    log_path = os.environ.get("HELIONCACHE_TRITON_COMPILE_LOG")
+    if not log_path:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str, sort_keys=True) + "\n")
+    except Exception:
+        # Profiling must never perturb compilation.
+        pass
+
+
+def _helioncache_compile_context(src, target, options, compile_hash: str, cache_hit: bool) -> dict:
+    return {
+        "kind": "triton_compile_stage",
+        "schema_version": 1,
+        "time_unix_ns": time.time_ns(),
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "compile_id": os.environ.get("HELIONCACHE_COMPILE_ID") or str(uuid.uuid4()),
+        "task": os.environ.get("HELIONCACHE_COMPILE_TASK"),
+        "variant": os.environ.get("HELIONCACHE_COMPILE_VARIANT"),
+        "shape": os.environ.get("HELIONCACHE_COMPILE_SHAPE"),
+        "input_index": os.environ.get("HELIONCACHE_COMPILE_INPUT_INDEX"),
+        "compile_hash": compile_hash,
+        "cache_hit": cache_hit,
+        "source_name": getattr(src, "name", None),
+        "source_ext": getattr(src, "ext", None),
+        "target_backend": getattr(target, "backend", None),
+        "target_arch": getattr(target, "arch", None),
+        "target_warp_size": getattr(target, "warp_size", None),
+        "num_warps": getattr(options, "num_warps", None),
+        "num_stages": getattr(options, "num_stages", None),
+        "num_ctas": getattr(options, "num_ctas", None),
+    }
+
 def filter_traceback(e: BaseException):
     """
     Removes code_generator.py and related files from tracebacks.
@@ -261,6 +320,15 @@ def compile(src, target=None, options=None, _env_vars=None):
     if not always_compile and metadata_path is not None:
         # cache hit!
         res = CompiledKernel(src, metadata_group, hash)
+        if _helioncache_profile_enabled():
+            record = _helioncache_compile_context(src, target, options, hash, cache_hit=True)
+            record.update({
+                "stage": "cache_hit",
+                "elapsed_ns": 0,
+                "elapsed_s": 0.0,
+                "artifact_size_bytes": None,
+            })
+            _helioncache_write_compile_record(record)
         if compilation_listener:
             compilation_listener(
                 src=src,
@@ -317,19 +385,43 @@ def compile(src, target=None, options=None, _env_vars=None):
     if compilation_listener:
         timer.finished_ir_initialization()
     for ext, compile_ir in list(stages.items())[first_stage:]:
+        stage_start_ns = time.perf_counter_ns()
         next_module = compile_ir(module, metadata)
+        stage_end_ns = time.perf_counter_ns()
+        helioncache_stage_extra = metadata.pop("_helioncache_triton_compile_stage", None)
         ir_filename = f"{file_name}.{ext}"
+        artifact_size_bytes = _helioncache_artifact_size(next_module)
+        cache_path = None
         if fn_override_manager is None:
             # Users can override kernels at scale by setting `ir_override` in autotune config
             # without TRITON_KERNEL_OVERRIDE
             if (ir_override := metadata.get("ir_override", None)) and ir_override.endswith(f".{ext}"):
                 next_module = parse(ir_override, ext, context)
+                artifact_size_bytes = _helioncache_artifact_size(next_module)
         elif full_name := fn_override_manager.get_file(ir_filename):
             print(f"\nOverriding kernel with file {full_name}")
             next_module = parse(full_name, ext, context)
+            artifact_size_bytes = _helioncache_artifact_size(next_module)
         # If TRITON_STORE_BINARY_ONLY is 1, only store cubin/hsaco/json
         if (not store_only_binary) or (ext in ("cubin", "hsaco", "json")):
             metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
+            cache_path = metadata_group[ir_filename]
+        if _helioncache_profile_enabled():
+            elapsed_ns = stage_end_ns - stage_start_ns
+            record = _helioncache_compile_context(src, target, options, hash, cache_hit=False)
+            record.update({
+                "stage": ext,
+                "elapsed_ns": elapsed_ns,
+                "elapsed_s": elapsed_ns / 1_000_000_000,
+                "artifact_size_bytes": artifact_size_bytes,
+                "cache_path": cache_path,
+                "metadata_name": metadata.get("name"),
+                "metadata_shared": metadata.get("shared"),
+                "metadata_tmem_size": metadata.get("tmem_size"),
+            })
+            if isinstance(helioncache_stage_extra, dict):
+                record.update(helioncache_stage_extra)
+            _helioncache_write_compile_record(record)
         if fn_dump_manager is not None:
             fn_dump_manager.put(next_module, ir_filename)
             if ext == "cubin":
