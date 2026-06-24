@@ -218,13 +218,45 @@ class CompileTimer:
         )
 
 
+@functools.lru_cache()
+def triton_key():
+    import pkgutil
+    TRITON_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    contents = []
+    # frontend
+    with open(__file__, "rb") as f:
+        contents += [hashlib.sha1(f.read()).hexdigest()]
+    # compiler
+    compiler_path = os.path.join(TRITON_PATH, 'compiler')
+    backends_path = os.path.join(TRITON_PATH, 'compiler', 'backends')
+    for lib in pkgutil.iter_modules([compiler_path, backends_path]):
+        with open(lib.module_finder.find_spec(lib.name).origin, "rb") as f:
+            contents += [hashlib.sha1(f.read()).hexdigest()]
+    # backend
+    libtriton_hash = hashlib.sha1()
+    with open(os.path.join(TRITON_PATH, "_C/libtriton.so"), "rb") as f:
+        while True:
+            chunk = f.read(1024**2)
+            if not chunk:
+                break
+            libtriton_hash.update(chunk)
+    contents.append(libtriton_hash.hexdigest())
+    # language
+    language_path = os.path.join(TRITON_PATH, 'language')
+    for lib in pkgutil.iter_modules([language_path]):
+        with open(lib.module_finder.find_spec(lib.name).origin, "rb") as f:
+            contents += [hashlib.sha1(f.read()).hexdigest()]
+    return f'{__version__}' + '-'.join(contents)
+
+
+
+
 def compile(src, target=None, options=None, _env_vars=None):
     compilation_listener = knobs.compilation.listener
     if compilation_listener:
         timer = CompileTimer()
 
-    if target is None:
-        target = driver.active.get_current_target()
+    target = driver.active.get_current_target()
     assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
     backend = make_backend(target)
     ir_source = not isinstance(src, ASTSource)
